@@ -1,0 +1,101 @@
+name: Build contribution graph demo
+
+on:
+  push:
+    branches: [master]
+    paths: ['.github/workflows/build-graph.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: contribution-graph-demo
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Create 366 explicitly labelled daily demo commits
+        env:
+          GRAPH_BRANCH: master
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from datetime import date, datetime, time, timedelta, timezone
+          from pathlib import Path
+          import io
+          import os
+          import subprocess
+          
+          ROOT = Path(__file__).resolve().parent
+          REPO = ROOT / 'graph-demo'
+          START = date(2025, 10, 11)
+          END = date(2026, 10, 11)
+          IDENTITY = 'nithin999989 <82808965+nithin999989@users.noreply.github.com>'
+          IST = timezone(timedelta(hours=5, minutes=30))
+          BRANCH = os.environ.get('GRAPH_BRANCH', 'main')
+          
+          def git(*args, **kwargs):
+              return subprocess.run(['git', '-C', str(REPO)] + list(args), check=True, **kwargs)
+          
+          def build_history(repo):
+              global REPO
+              REPO = Path(repo)
+              if (REPO / 'graph.txt').exists():
+                  raise RuntimeError('Graph history already exists; refusing to add duplicates.')
+              if git('branch', '--show-current', stdout=subprocess.PIPE).stdout.decode().strip() != BRANCH:
+                  raise RuntimeError('Unexpected branch.')
+              parent = git('rev-parse', 'HEAD', stdout=subprocess.PIPE).stdout.decode().strip()
+              now = int(datetime.now(timezone.utc).timestamp())
+              readme = (
+                  '# Contribution graph demo\n\n'
+                  'Generated on 11 October 2026 with one demo commit per date from '
+                  '11 October 2025 through 11 October 2026.\n\n'
+                  'Author dates are deliberately chosen to demonstrate GitHub contribution '
+                  'graph behavior. These commits are synthetic and do not represent coding '
+                  'work performed on those dates. Committer dates record generation time.\n'
+              ).encode()
+              stream = io.BytesIO()
+              graph = b''
+              for index in range((END - START).days + 1):
+                  day = START + timedelta(days=index)
+                  authored = int(datetime.combine(day, time(12), IST).timestamp())
+                  message = ('Graph demo: ' + day.isoformat() + '\n').encode()
+                  graph += ('Synthetic graph entry: ' + day.isoformat() + '\n').encode()
+                  stream.write(('commit refs/heads/%s\nmark :%d\nauthor %s %d +0530\n'
+                                'committer %s %d +0000\ndata %d\n' %
+                                (BRANCH, index + 1, IDENTITY, authored, IDENTITY, now, len(message))).encode())
+                  stream.write(message)
+                  stream.write(('from %s\n' % (parent if index == 0 else ':' + str(index))).encode())
+                  if index == 0:
+                      stream.write(('M 100644 inline README.md\ndata %d\n' % len(readme)).encode())
+                      stream.write(readme)
+                  stream.write(('M 100644 inline graph.txt\ndata %d\n' % len(graph)).encode())
+                  stream.write(graph)
+                  stream.write(b'\n')
+              stream.write(b'done\n')
+              git('fast-import', '--quiet', '--done', input=stream.getvalue())
+              git('reset', '--hard', 'HEAD', stdout=subprocess.PIPE)
+              rows = git('log', '--format=%aI|%ae|%s', '--grep=^Graph demo:', stdout=subprocess.PIPE).stdout.decode().splitlines()
+              expected = {(START + timedelta(days=i)).isoformat() for i in range(366)}
+              assert len(rows) == 366
+              assert {row.split('|')[0][:10] for row in rows} == expected
+              assert all(row.split('|')[1] == '82808965+nithin999989@users.noreply.github.com' for row in rows)
+              assert git('status', '--porcelain', stdout=subprocess.PIPE).stdout == b''
+              git('fsck', '--full', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+              print('Verified 366 daily demo commits, correct author identity, and a clean default branch.')
+          
+          
+          if Path('graph.txt').exists():
+              print('Demo already prepared; no duplicate commits were added.')
+          else:
+              build_history(Path.cwd())
+              subprocess.run(['git', 'push', 'origin', BRANCH], check=True)
+          PY
